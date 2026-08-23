@@ -3,6 +3,7 @@
 [![CI](https://github.com/dougcalobrisi/m0601-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/dougcalobrisi/m0601-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/m0601.svg)](https://crates.io/crates/m0601)
 [![docs.rs](https://img.shields.io/docsrs/m0601)](https://docs.rs/m0601)
+[![Docs](https://img.shields.io/badge/docs-m0601-blue)](https://doug.sh/docs/m0601-rs/)
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue)](https://github.com/dougcalobrisi/m0601-rs#build--install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/dougcalobrisi/m0601-rs/blob/main/LICENSE)
 
@@ -37,9 +38,11 @@ winding temperature and a coarse 8-bit position, while replies to drive
 frames carry a fine 16-bit position and no temperature. The library decodes
 each reply by the command that elicited it.
 
-Documentation map — the full docs live in
+**Full docs, rendered: [doug.sh/docs/m0601-rs](https://doug.sh/docs/m0601-rs/)**
+
+Documentation map — the source lives in
 [`docs/content/docs/`](https://github.com/dougcalobrisi/m0601-rs/tree/main/docs/content/docs)
-(a Hugo site; `cd docs && hugo server` to read it rendered):
+(a Hugo site; `cd docs && hugo server` to preview it locally):
 
 - **[Getting started](https://github.com/dougcalobrisi/m0601-rs/blob/main/docs/content/docs/getting-started.md)**
   and the **[first-spin tutorial](https://github.com/dougcalobrisi/m0601-rs/blob/main/docs/content/docs/tutorial.md)**

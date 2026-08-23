@@ -68,29 +68,16 @@ jobs:
           sudo install -m 0755 hugo /usr/local/bin/hugo
           hugo version
 
-      # Sets baseURL to the repo's real Pages URL, so the same config works
-      # whether or not the site is served from a project sub-path.
-      - name: Configure Pages
-        if: github.event_name == 'push' || inputs.deploy
-        id: pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-
       # --panicOnWarning turns Hugo's soft failures — a missing layout, an
       # unresolved ref — into a red build. A missing submodule is exactly the
       # class of breakage that otherwise ships a blank site.
+      # baseURL deliberately comes from docs/hugo.toml and is not overridden
+      # here. The site is served at doug.sh/docs/m0601-rs/, which is a fixed
+      # canonical URL rather than whatever Pages URL this repo happens to have,
+      # so a build-time override would point every link at the wrong host.
       - name: Build site
         working-directory: docs
-        # --baseURL is passed only when Configure Pages actually ran; an empty
-        # override would otherwise rewrite every link to a bare path.
-        run: |
-          set -euo pipefail
-          if [ -n "${PAGES_BASE_URL}" ]; then
-            hugo --minify --panicOnWarning --baseURL "${PAGES_BASE_URL}"
-          else
-            hugo --minify --panicOnWarning
-          fi
-        env:
-          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: hugo --minify --panicOnWarning
 
       - name: Upload artifact
         if: github.event_name == 'push' || inputs.deploy

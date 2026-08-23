@@ -1,8 +1,10 @@
 # Hugo config for the m0601 documentation site.
 #
-# Served at a GitHub Pages *project* sub-path, so baseURL carries /m0601-rs/.
+# Built and hosted by GitHub Pages, but served to readers at
+# doug.sh/docs/m0601-rs/, which proxies that origin. baseURL is the canonical
+# public URL and is deliberately not overridden at build time by the workflow.
 # `hugo server` overrides baseURL locally, so previews work regardless.
-baseURL = 'https://dougcalobrisi.github.io/m0601-rs/'
+baseURL = 'https://doug.sh/docs/m0601-rs/'
 title = 'm0601 — RS485 hub motor driver'
 theme = 'hugo-book'
 
