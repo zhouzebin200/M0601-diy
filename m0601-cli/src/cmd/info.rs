@@ -1,13 +1,16 @@
-//! `info` — configuration block plus a one-shot live readout.
-
 use std::process::ExitCode;
 use std::time::Duration;
 
-use m0601::M0601;
 use m0601::protocol::{BAUD, CUR_MAX, CUR_MIN, POS_MAX, RPM_MAX, RPM_MIN};
+use m0601::{FirmwareProfile, M0601};
 
-pub fn run(port: &str, id: u8, timeout: Duration) -> m0601::Result<ExitCode> {
-    let mut motor = M0601::open(port, id, timeout)?;
+pub fn run(
+    port: &str,
+    id: u8,
+    timeout: Duration,
+    profile: FirmwareProfile,
+) -> m0601::Result<ExitCode> {
+    let mut motor = M0601::open(port, id, timeout)?.with_profile(profile);
 
     let bar = "=".repeat(48);
     println!("{bar}");
@@ -16,6 +19,7 @@ pub fn run(port: &str, id: u8, timeout: Duration) -> m0601::Result<ExitCode> {
     println!("  Port          : {port}");
     println!("  Baud / format : {BAUD} 8N1 (RS485 half-duplex)");
     println!("  Motor ID      : 0x{id:02X} ({id})");
+    println!("  Profile       : {profile}");
     println!("  Velocity range: {RPM_MIN}..{RPM_MAX} RPM");
     println!("  Current range : {CUR_MIN}..{CUR_MAX} (~-8..+8 A)");
     println!("  Position range: 0..{POS_MAX} (0..360 deg)");
@@ -33,18 +37,21 @@ pub fn run(port: &str, id: u8, timeout: Duration) -> m0601::Result<ExitCode> {
     println!("  Speed         : {:+} RPM", fb.speed_rpm);
     println!("  Current       : {:+.3} A", fb.current_a);
     println!("  Position      : {:.1} deg", fb.position_deg);
-    // query() replies always carry the temperature; "--" guards a future
-    // caller change without a panicking unwrap.
-    match fb.temp_c {
-        Some(t) => println!("  Winding temp  : {t} C"),
-        None => println!("  Winding temp  : --"),
+    if fb.profile == FirmwareProfile::NoTemperature {
+        println!("  Winding temp  : uncalibrated (no_temperature profile)");
+    } else {
+        match fb.temp_c {
+            Some(t) => println!("  Winding temp  : {t} C"),
+            None => println!("  Winding temp  : --"),
+        }
     }
-    let status = if fb.faults.is_ok() {
+    let eff = fb.effective_faults();
+    let status = if eff.is_ok() {
         "OK".to_owned()
     } else {
-        format!("FAULT ({})", fb.faults)
+        format!("FAULT ({eff})")
     };
-    println!("  Error         : 0x{:02X}  {status}", fb.faults.0);
+    println!("  Error         : 0x{:02X}  {status}", eff.0);
     println!("  Raw frame     : {}", fb.raw_hex());
     println!("{bar}");
     Ok(ExitCode::SUCCESS)

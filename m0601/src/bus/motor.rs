@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use crate::error::Result;
 use crate::protocol::{
-    Frame, ReplyKind, frame_brake, frame_current, frame_feedback, frame_position, frame_velocity,
-    frames, parse_feedback,
+    Frame, ReplyKind, frame_brake, frame_current, frame_disable, frame_enable, frame_enter_iap,
+    frame_feedback, frame_position, frame_velocity, frames, parse_feedback_with_profile,
 };
 use crate::transport::{SerialTransport, Transport};
-use crate::types::{Feedback, Mode};
+use crate::types::{Feedback, FirmwareProfile, Mode};
 
 use super::Bus;
 use super::pacing::{Port, mode_all, peek_min_gap, stop_all, with_gap};
@@ -86,6 +86,8 @@ pub struct M0601<T: Transport = SerialTransport> {
     /// Default accel byte for [`drive_velocity`](Self::drive_velocity) — see
     /// [`with_default_accel`](Self::with_default_accel).
     pub(super) default_accel: u8,
+    /// Active firmware profile (standard or no-temperature).
+    pub(super) profile: FirmwareProfile,
 }
 
 // Manual impl: handles are cheap to clone regardless of whether T is Clone.
@@ -99,6 +101,7 @@ impl<T: Transport> Clone for M0601<T> {
             position_mirror: self.position_mirror,
             strict_crc: self.strict_crc,
             default_accel: self.default_accel,
+            profile: self.profile,
         }
     }
 }
@@ -115,6 +118,7 @@ impl<T: Transport> std::fmt::Debug for M0601<T> {
             .field("position_mirror", &self.position_mirror)
             .field("strict_crc", &self.strict_crc)
             .field("default_accel", &self.default_accel)
+            .field("profile", &self.profile)
             .field("min_gap", &peek_min_gap(&self.port))
             .finish_non_exhaustive()
     }
@@ -226,6 +230,26 @@ impl<T: Transport> M0601<T> {
         self.default_accel
     }
 
+    /// Set the firmware variant profile for this motor handle.
+    ///
+    /// Use [`FirmwareProfile::NoTemperature`] for motors running
+    /// `01a_no_temperature.bin` or with unpopulated/uncalibrated NTC thermistors.
+    #[must_use]
+    pub fn with_profile(mut self, profile: FirmwareProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Set the firmware variant profile on an existing handle in place.
+    pub fn set_profile(&mut self, profile: FirmwareProfile) {
+        self.profile = profile;
+    }
+
+    /// The firmware variant profile for this motor handle.
+    pub fn profile(&self) -> FirmwareProfile {
+        self.profile
+    }
+
     /// The motor ID this handle addresses.
     pub fn id(&self) -> u8 {
         self.id
@@ -285,7 +309,7 @@ impl<T: Transport> M0601<T> {
         // for this id can still be selected. Advisory mode keeps taking the
         // first id-matching frame regardless of CRC.
         let fb = frames(tx, rx)?.find_map(|frame| {
-            parse_feedback(frame, kind)
+            parse_feedback_with_profile(frame, kind, self.profile)
                 .filter(|fb| fb.id == self.id && (!self.strict_crc || fb.crc_ok))
         })?;
         Some(self.adjust(fb))
@@ -450,6 +474,34 @@ impl<T: Transport> M0601<T> {
     pub fn brake(&mut self) -> Result<()> {
         let frame = frame_brake(self.id);
         with_gap(&self.port, |t| t.send(&frame))
+    }
+
+    /// Send an enable command (`0xED 0xEE`) to enable PWM motor output.
+    ///
+    /// Supported by firmware variants like `01a_no_temperature.bin` (`MCPWM_Switch(1)`).
+    pub fn enable(&mut self) -> Result<()> {
+        let frame = frame_enable(self.id);
+        with_gap(&self.port, |t| t.send(&frame))
+    }
+
+    /// Send a disable command (`0xED 0xDD`) to disable PWM motor output.
+    ///
+    /// Supported by firmware variants like `01a_no_temperature.bin` (`MCPWM_Switch(0)`).
+    pub fn disable(&mut self) -> Result<()> {
+        let frame = frame_disable(self.id);
+        with_gap(&self.port, |t| t.send(&frame))
+    }
+
+    /// Trigger software reboot of this motor into the RS485 IAP bootloader.
+    ///
+    /// Sends [`frame_enter_iap`] (`AA 55 BF CF 00×6`) five times with 20 ms spacing.
+    pub fn enter_iap(&mut self) -> Result<()> {
+        let frame = frame_enter_iap();
+        for _ in 0..5 {
+            with_gap(&self.port, |t| t.send(&frame))?;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
     }
 
     /// Best-effort controlled stop: force velocity mode, then five

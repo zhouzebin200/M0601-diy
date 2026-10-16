@@ -37,9 +37,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::error::Result;
-use crate::protocol::{self, frame_feedback, frame_id_query, frame_set_id, frames};
+use crate::protocol::{self, frame_enter_iap, frame_feedback, frame_id_query, frame_set_id, frames};
 use crate::transport::{SerialTransport, Transport};
-use crate::types::Mode;
+use crate::types::{FirmwareProfile, Mode};
 
 use pacing::{Port, lock, mode_all, peek_min_gap, stop_all, with_gap};
 
@@ -84,6 +84,8 @@ pub struct Bus<T: Transport = SerialTransport> {
     /// Default velocity-drive accel propagated to every [`M0601`] minted from
     /// this bus — see [`with_default_accel`](Self::with_default_accel).
     default_accel: u8,
+    /// Default firmware profile propagated to every [`M0601`] minted from this bus.
+    profile: FirmwareProfile,
 }
 
 // Manual impl: buses are cheap to clone regardless of whether T is Clone —
@@ -97,6 +99,7 @@ impl<T: Transport> Clone for Bus<T> {
             timeout: self.timeout,
             strict_crc: self.strict_crc,
             default_accel: self.default_accel,
+            profile: self.profile,
         }
     }
 }
@@ -110,6 +113,7 @@ impl<T: Transport> std::fmt::Debug for Bus<T> {
             .field("timeout", &self.timeout)
             .field("strict_crc", &self.strict_crc)
             .field("default_accel", &self.default_accel)
+            .field("profile", &self.profile)
             .field("min_gap", &peek_min_gap(&self.port))
             .finish_non_exhaustive()
     }
@@ -140,6 +144,7 @@ impl<T: Transport> Bus<T> {
             timeout,
             strict_crc: false,
             default_accel: DEFAULT_DRIVE_ACCEL,
+            profile: FirmwareProfile::Standard,
         }
     }
 
@@ -265,6 +270,23 @@ impl<T: Transport> Bus<T> {
         self.default_accel
     }
 
+    /// Set the default firmware variant profile propagated to motors minted from this bus.
+    #[must_use]
+    pub fn with_profile(mut self, profile: FirmwareProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Set the firmware variant profile on this bus in place.
+    pub fn set_profile(&mut self, profile: FirmwareProfile) {
+        self.profile = profile;
+    }
+
+    /// The default firmware variant profile for this bus.
+    pub fn profile(&self) -> FirmwareProfile {
+        self.profile
+    }
+
     /// A driver handle for the motor at `id` (validated: `0x01..=0xFE`).
     ///
     /// Handles keep the underlying transport alive; the `Bus` itself may be
@@ -279,6 +301,7 @@ impl<T: Transport> Bus<T> {
             position_mirror: PositionMirror::default(),
             strict_crc: self.strict_crc,
             default_accel: self.default_accel,
+            profile: self.profile,
         })
     }
 
@@ -473,6 +496,17 @@ impl<T: Transport> Bus<T> {
             protocol::validate_id(id)?;
         }
         mode_all(&self.port, ids, mode)
+    }
+
+    /// Broadcast command to reboot connected motors into the RS485 IAP bootloader.
+    ///
+    /// Sends [`frame_enter_iap`] five times with 20 ms pacing.
+    pub fn enter_iap(&self) -> Result<()> {
+        let frame = frame_enter_iap();
+        for _ in 0..5 {
+            self.send_paced(&frame, Duration::from_millis(20))?;
+        }
+        Ok(())
     }
 
     /// Recover the transport, if this `Bus` and all its motors are dropped

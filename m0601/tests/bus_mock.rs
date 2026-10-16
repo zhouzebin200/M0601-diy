@@ -6,10 +6,10 @@
 use std::time::Duration;
 
 use m0601::protocol::{
-    ReplyKind, frame_brake, frame_feedback, frame_from_bytes, frame_id_query, frame_mode,
-    frame_velocity,
+    ReplyKind, frame_brake, frame_disable, frame_enable, frame_enter_iap, frame_feedback,
+    frame_from_bytes, frame_id_query, frame_mode, frame_velocity,
 };
-use m0601::{Bus, BusTiming, Error, M0601, MockTransport, Mode, PositionMirror};
+use m0601::{Bus, BusTiming, Error, FirmwareProfile, M0601, MockTransport, Mode, PositionMirror};
 
 const TIMEOUT: Duration = Duration::from_millis(150);
 
@@ -1180,4 +1180,58 @@ fn per_handle_default_accel_overrides_the_bus_default() {
     m.drive_velocity(100).unwrap();
     let mock = m.into_transport().expect("sole handle");
     assert_eq!(mock.sent[0], frame_velocity(0x01, 100, 7).to_vec());
+}
+
+#[test]
+fn enable_and_disable_commands_send_expected_frames() {
+    let mut m = motor(MockTransport::default());
+    m.enable().unwrap();
+    m.disable().unwrap();
+    let mock = m.into_transport().expect("sole handle");
+    assert_eq!(mock.sent.len(), 2);
+    assert_eq!(mock.sent[0], frame_enable(0x01).to_vec());
+    assert_eq!(mock.sent[1], frame_disable(0x01).to_vec());
+}
+
+#[test]
+fn enter_iap_sends_reboot_sequence() {
+    let mut m = motor(MockTransport::default());
+    m.enter_iap().unwrap();
+    let mock = m.into_transport().expect("sole handle");
+    assert_eq!(mock.sent.len(), 5, "enter_iap sends 5 frames");
+    for frame in &mock.sent {
+        assert_eq!(frame, &frame_enter_iap().to_vec());
+    }
+}
+
+#[test]
+fn bus_enter_iap_broadcasts_sequence() {
+    let bus = Bus::with_transport(MockTransport::default(), TIMEOUT);
+    bus.enter_iap().unwrap();
+    let mock = bus.into_transport().expect("sole handle");
+    assert_eq!(mock.sent.len(), 5);
+    for frame in &mock.sent {
+        assert_eq!(frame, &frame_enter_iap().to_vec());
+    }
+}
+
+#[test]
+fn profile_propagation_and_telemetry_fault_masking() {
+    // Bus with NoTemperature profile propagates to motors
+    let bus = Bus::with_transport(MockTransport::default(), TIMEOUT)
+        .with_profile(FirmwareProfile::NoTemperature);
+    assert_eq!(bus.profile(), FirmwareProfile::NoTemperature);
+
+    let m = bus.motor(0x01).expect("valid id");
+    assert_eq!(m.profile(), FirmwareProfile::NoTemperature);
+
+    // Motor receives query reply with overheat fault bit 0x10 set
+    let reply = vec![0x01, 0x02, 0x00, 0x00, 0x00, 0x64, 0x50, 0x00, 0x10, 0x00];
+    let mut m = motor(MockTransport::with_replies([reply])).with_profile(FirmwareProfile::NoTemperature);
+
+    let fb = m.query().unwrap().expect("parsed");
+    assert_eq!(fb.profile, FirmwareProfile::NoTemperature);
+    assert!(fb.faults.overheat(), "raw wire faults bit remains true");
+    assert!(!fb.effective_faults().overheat(), "effective_faults must mask overheat in NoTemperature profile");
+    assert!(!fb.has_valid_temperature(), "temperature is invalid in NoTemperature profile");
 }

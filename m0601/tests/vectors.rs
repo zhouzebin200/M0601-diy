@@ -11,9 +11,9 @@
 
 use m0601::protocol::{
     CUR_MAX, CUR_MIN, POS_MAX, ReplyKind, crc8_maxim, deg_to_raw8, frame_brake, frame_current,
-    frame_drive_reply, frame_feedback, frame_from_bytes, frame_id_query, frame_mode,
-    frame_position, frame_query_reply, frame_set_id, frame_velocity, parse_feedback, raw8_to_deg,
-    validate_id,
+    frame_disable, frame_drive_reply, frame_enable, frame_enter_iap, frame_feedback,
+    frame_from_bytes, frame_iap_chunk, frame_id_query, frame_mode, frame_position,
+    frame_query_reply, frame_set_id, frame_velocity, parse_feedback, raw8_to_deg, validate_id,
 };
 use m0601::{Error, Faults, Mode};
 
@@ -542,4 +542,28 @@ fn deg_to_raw8_round_trips_and_clamps_like_deg_to_raw() {
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         assert_eq!(deg_to_raw8(bad), 0);
     }
+}
+
+#[test]
+fn enable_disable_golden_vectors() {
+    assert_eq!(
+        frame_enable(0x01),
+        [0x01, 0xED, 0xEE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6B]
+    );
+    assert_eq!(
+        frame_disable(0x01),
+        [0x01, 0xED, 0xDD, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38]
+    );
+}
+
+#[test]
+fn iap_bootloader_golden_vectors() {
+    assert_eq!(
+        frame_enter_iap(),
+        [0xAA, 0x55, 0xBF, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+
+    let chunk = [0x01, 0x02, 0x03, 0x04];
+    let packet = frame_iap_chunk(&chunk);
+    assert_eq!(packet, vec![0xAA, 0x55, 0x01, 0x02, 0x03, 0x04, 0xCE]);
 }

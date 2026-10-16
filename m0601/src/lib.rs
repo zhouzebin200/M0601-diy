@@ -185,6 +185,7 @@
 
 pub mod bus;
 pub mod error;
+pub mod iap;
 #[cfg(target_os = "linux")]
 mod low_latency;
 pub mod protocol;
@@ -197,7 +198,8 @@ pub use bus::{
     bus_period,
 };
 pub use error::{Error, Result};
+pub use iap::{IapFlashing, IapOptions, IapProgress};
 pub use protocol::{ReplyKind, drive_floor, frame_time};
 pub use slew::SlewLimiter;
 pub use transport::{MockTransport, SerialTransport, Transport};
-pub use types::{Faults, Feedback, Mode, PositionAccumulator, Telemetry};
+pub use types::{Faults, Feedback, FirmwareProfile, Mode, PositionAccumulator, Telemetry};

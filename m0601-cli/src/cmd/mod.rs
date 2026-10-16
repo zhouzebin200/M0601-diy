@@ -11,6 +11,7 @@ pub mod monitor;
 pub mod raw;
 pub mod scan;
 pub mod set_id;
+pub mod update;
 
 /// The protocol's speed ceiling for entering position mode, in RPM.
 pub const POSITION_ENTRY_RPM: i16 = 10;

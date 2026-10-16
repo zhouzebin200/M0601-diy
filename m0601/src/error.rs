@@ -47,6 +47,10 @@ pub enum Error {
     /// freezes the setpoint, and a `NaN` rate silently disables limiting.
     #[error("invalid slew rate {0} (must be finite and > 0)")]
     InvalidSlewRate(f32),
+
+    /// An RS485 IAP firmware update failure.
+    #[error("firmware update failed: {0}")]
+    Iap(String),
 }
 
 impl Error {

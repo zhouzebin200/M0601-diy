@@ -26,6 +26,15 @@ pub trait Transport {
     /// outcome (wrong ID, unpowered motor, scan probe).
     fn send_recv(&mut self, data: &[u8], wait: Duration) -> Result<Vec<u8>>;
 
+    /// Read incoming bytes without clearing the input buffer first.
+    ///
+    /// Useful for listening to asynchronous beacons or bootloader announcements
+    /// (such as the M0601 power-on `AA 55 FF` beacon) where bytes arrived
+    /// before this call or in fragmented chunks.
+    fn recv(&mut self, wait: Duration) -> Result<Vec<u8>> {
+        self.send_recv(&[], wait)
+    }
+
     /// How long the driver should actually pause when the protocol wants a
     /// gap *between* frames. Real transports return `d`; mocks return zero
     /// so tests run instantly.
@@ -183,6 +192,26 @@ impl Transport for SerialTransport {
         buf.truncate(filled);
         Ok(buf)
     }
+
+    fn recv(&mut self, wait: Duration) -> Result<Vec<u8>> {
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        let n = self.port.bytes_to_read().map_err(|e| self.serial_err(e))? as usize;
+        let mut buf = vec![0u8; n];
+        let mut filled = 0;
+        while filled < n {
+            match self.port.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(k) => filled += k,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        buf.truncate(filled);
+        Ok(buf)
+    }
 }
 
 /// In-memory [`Transport`] for tests and examples.
@@ -257,6 +286,11 @@ impl Transport for MockTransport {
         } else {
             Ok(reply)
         }
+    }
+
+    fn recv(&mut self, _wait: Duration) -> Result<Vec<u8>> {
+        self.check_fail()?;
+        Ok(self.replies.pop_front().unwrap_or_default())
     }
 
     fn pace(&self, _d: Duration) -> Duration {

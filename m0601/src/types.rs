@@ -43,6 +43,61 @@ impl Mode {
     }
 }
 
+/// Firmware variant profile for the M0601 motor.
+///
+/// Standard M0601 / DDT M0601C-111 motors include an internal NTC thermistor
+/// for winding temperature telemetry and hardware overheat protection (tripping
+/// at 80 °C).
+///
+/// Customized hardware variants running `01a_no_temperature.bin` omit or differ
+/// in thermistor calibration; using standard temperature protection causes false
+/// overheat trips (`0x10`). [`FirmwareProfile::NoTemperature`] disables overheat
+/// fault masking and marks temperature telemetry as uncalibrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum FirmwareProfile {
+    /// Standard factory firmware with calibrated temperature sensor and overheat protection.
+    #[default]
+    Standard,
+    /// Custom variant firmware (e.g. `01a_no_temperature.bin`) with bypassed temperature protection.
+    NoTemperature,
+}
+
+impl FirmwareProfile {
+    /// Decode a profile name. Case-insensitive; accepts `"standard"`, `"default"`,
+    /// `"notemperature"`, `"no-temperature"`, `"no_temperature"`.
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+            "standard" | "default" => Some(Self::Standard),
+            "notemperature" | "notemp" => Some(Self::NoTemperature),
+            _ => None,
+        }
+    }
+
+    /// Canonical profile name string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::NoTemperature => "no-temperature",
+        }
+    }
+}
+
+impl fmt::Display for FirmwareProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for FirmwareProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::from_str_name(s).ok_or_else(|| {
+            format!("unknown firmware profile {s:?} (expected 'standard' or 'no-temperature')")
+        })
+    }
+}
+
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -211,6 +266,8 @@ pub struct Feedback {
     /// Which reply layout this frame was decoded with — determined by the
     /// command that elicited it, not by anything in the reply itself.
     pub kind: ReplyKind,
+    /// Firmware profile under which this telemetry was decoded.
+    pub profile: FirmwareProfile,
     /// Active control mode, if byte 1 held a known mode value.
     pub mode: Option<Mode>,
     /// Raw mode byte, for display when `mode` is `None`.
@@ -245,6 +302,27 @@ pub struct Feedback {
 }
 
 impl Feedback {
+    /// Whether this feedback carries a calibrated, valid winding temperature.
+    ///
+    /// Returns `false` if [`profile`](Self::profile) is [`FirmwareProfile::NoTemperature`]
+    /// (such as `01a_no_temperature.bin` where temperature measurement is
+    /// unpopulated or uncalibrated) or if `kind` is not [`ReplyKind::Query`].
+    pub fn has_valid_temperature(&self) -> bool {
+        self.profile == FirmwareProfile::Standard && self.temp_c.is_some()
+    }
+
+    /// Faults filtered by the active [`FirmwareProfile`].
+    ///
+    /// On [`FirmwareProfile::NoTemperature`], false-positive overheat trips
+    /// ([`Faults::OVERHEAT`]) resulting from unpopulated or mismatched NTC
+    /// thermistors are masked out.
+    pub fn effective_faults(&self) -> Faults {
+        match self.profile {
+            FirmwareProfile::Standard => self.faults,
+            FirmwareProfile::NoTemperature => Faults(self.faults.0 & !Faults::OVERHEAT),
+        }
+    }
+
     /// The raw frame as uppercase space-separated hex,
     /// e.g. `"01 02 F8 30 00 64 28 80 03 00"`.
     pub fn raw_hex(&self) -> String {
@@ -300,8 +378,10 @@ impl Telemetry {
     /// layout carries: temperature (query replies) and the hi-res angle
     /// (drive replies).
     pub fn absorb(&mut self, fb: Feedback) {
-        if let Some(t) = fb.temp_c {
-            self.temp_c = Some(t);
+        if fb.has_valid_temperature() {
+            self.temp_c = fb.temp_c;
+        } else if fb.profile == FirmwareProfile::NoTemperature {
+            self.temp_c = None;
         }
         if fb.kind == ReplyKind::Drive {
             self.position_deg = Some(fb.position_deg);
@@ -642,5 +722,41 @@ mod tests {
             PositionAccumulator::max_unaliased_rpm(Duration::ZERO),
             f64::INFINITY
         );
+    }
+
+    #[test]
+    fn firmware_profile_parses_and_formats() {
+        use super::FirmwareProfile;
+        use std::str::FromStr;
+
+        assert_eq!(FirmwareProfile::from_str("standard"), Ok(FirmwareProfile::Standard));
+        assert_eq!(FirmwareProfile::from_str("default"), Ok(FirmwareProfile::Standard));
+        assert_eq!(FirmwareProfile::from_str("no-temperature"), Ok(FirmwareProfile::NoTemperature));
+        assert_eq!(FirmwareProfile::from_str("notemperature"), Ok(FirmwareProfile::NoTemperature));
+        assert_eq!(FirmwareProfile::from_str("no_temperature"), Ok(FirmwareProfile::NoTemperature));
+        assert!(FirmwareProfile::from_str("invalid").is_err());
+
+        assert_eq!(FirmwareProfile::Standard.to_string(), "standard");
+        assert_eq!(FirmwareProfile::NoTemperature.to_string(), "no-temperature");
+    }
+
+    #[test]
+    fn no_temperature_profile_masks_overheat_fault() {
+        use super::{Faults, Feedback, FirmwareProfile};
+
+        let mut fb = fb(crate::protocol::ReplyKind::Query);
+        fb.faults = Faults(Faults::OVERHEAT | Faults::SENSOR_ERR);
+
+        // Standard profile retains overheat fault
+        fb.profile = FirmwareProfile::Standard;
+        assert!(fb.effective_faults().overheat());
+        assert!(fb.effective_faults().sensor_err());
+        assert!(fb.has_valid_temperature());
+
+        // NoTemperature profile masks overheat fault and ignores temperature
+        fb.profile = FirmwareProfile::NoTemperature;
+        assert!(!fb.effective_faults().overheat(), "overheat must be masked");
+        assert!(fb.effective_faults().sensor_err(), "other faults must remain");
+        assert!(!fb.has_valid_temperature(), "temperature not valid in NoTemperature profile");
     }
 }

@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::types::{Faults, Feedback, Mode};
+use crate::types::{Faults, Feedback, FirmwareProfile, Mode};
 
 /// RS485 baud rate. The format is fixed: 115200 8N1, half-duplex.
 pub const BAUD: u32 = 115_200;
@@ -26,6 +26,24 @@ pub const CMD_DRIVE: u8 = 0x64;
 pub const CMD_QUERY: u8 = 0x74;
 /// Mode-switch command. **Its last byte is the mode, not a CRC.**
 pub const CMD_MODE: u8 = 0xA0;
+/// Motor output enable/disable command (`0xED`).
+pub const CMD_ENABLE: u8 = 0xED;
+/// Enable output sub-command (`0xEE`, `MCPWM_Switch(1)`).
+pub const SUB_ENABLE: u8 = 0xEE;
+/// Disable output sub-command (`0xDD`, `MCPWM_Switch(0)`).
+pub const SUB_DISABLE: u8 = 0xDD;
+
+/// IAP bootloader software reset trigger sequence (`AA 55 BF CF`).
+pub const IAP_TRIGGER: [u8; 4] = [0xAA, 0x55, 0xBF, 0xCF];
+/// IAP bootloader power-on/reset beacon sequence (`AA 55 FF`).
+pub const IAP_BEACON: [u8; 3] = [0xAA, 0x55, 0xFF];
+/// IAP host-to-bootloader handshake sequence (`AA 55 64 C8`).
+pub const IAP_HANDSHAKE: [u8; 4] = [0xAA, 0x55, 0x64, 0xC8];
+/// IAP bootloader acknowledgment sequence (`AA 55 AA`).
+pub const IAP_ACK: [u8; 3] = [0xAA, 0x55, 0xAA];
+
+/// Default chunk size for RS485 IAP firmware updates (2048 bytes).
+pub const IAP_CHUNK_SIZE: usize = 2048;
 
 /// Minimum velocity command, RPM.
 pub const RPM_MIN: i16 = -330;
@@ -274,6 +292,41 @@ pub fn frame_id_query() -> Frame {
 pub fn frame_set_id(new_id: u8) -> Result<Frame> {
     validate_id(new_id)?;
     Ok([0xAA, 0x55, 0x53, new_id, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+}
+
+/// Motor output enable frame: `[id, 0xED, 0xEE, 0, 0, 0, 0, 0, 0, crc]`.
+///
+/// Supported by firmware variants like `01a_no_temperature.bin` to enable
+/// PWM switching (`MCPWM_Switch(1)`).
+pub fn frame_enable(id: u8) -> Frame {
+    frame(id, CMD_ENABLE, [SUB_ENABLE, 0, 0, 0, 0, 0, 0])
+}
+
+/// Motor output disable frame: `[id, 0xED, 0xDD, 0, 0, 0, 0, 0, 0, crc]`.
+///
+/// Supported by firmware variants like `01a_no_temperature.bin` to disable
+/// PWM switching (`MCPWM_Switch(0)`).
+pub fn frame_disable(id: u8) -> Frame {
+    frame(id, CMD_ENABLE, [SUB_DISABLE, 0, 0, 0, 0, 0, 0])
+}
+
+/// Jump to RS485 IAP bootloader frame (`AA 55 BF CF 00×6`, **no CRC**).
+///
+/// Commands the motor MCU to perform a software reset directly into its
+/// IAP bootloader state.
+pub fn frame_enter_iap() -> Frame {
+    [0xAA, 0x55, 0xBF, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+}
+
+/// Assemble an RS485 IAP firmware chunk packet:
+/// `[0xAA, 0x55] + chunk_data + [crc8_maxim(chunk_data)]`.
+pub fn frame_iap_chunk(chunk_data: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(2 + chunk_data.len() + 1);
+    packet.push(0xAA);
+    packet.push(0x55);
+    packet.extend_from_slice(chunk_data);
+    packet.push(crc8_maxim(chunk_data));
+    packet
 }
 
 /// Check that `id` is an assignable motor ID (`0x01..=0xFE`).
@@ -536,6 +589,20 @@ impl ReplyKind {
 /// assert!((d.position_deg - 113.91).abs() < 0.01);
 /// ```
 pub fn parse_feedback(data: &[u8], kind: ReplyKind) -> Option<Feedback> {
+    parse_feedback_with_profile(data, kind, FirmwareProfile::Standard)
+}
+
+/// Parse a telemetry frame from raw reply bytes with an explicit [`FirmwareProfile`],
+/// decoding bytes 6–7 according to `kind`.
+///
+/// When `profile` is [`FirmwareProfile::NoTemperature`], telemetry is decoded
+/// with awareness that winding temperature is uncalibrated or bypassed,
+/// allowing [`Feedback::effective_faults`] to mask spurious overheat trips.
+pub fn parse_feedback_with_profile(
+    data: &[u8],
+    kind: ReplyKind,
+    profile: FirmwareProfile,
+) -> Option<Feedback> {
     let raw: Frame = data.get(..FRAME_LEN)?.try_into().ok()?;
     let current_raw = i16::from_be_bytes([raw[2], raw[3]]);
     // The vendor sample and the navigation_robot C driver both decode the
@@ -554,6 +621,7 @@ pub fn parse_feedback(data: &[u8], kind: ReplyKind) -> Option<Feedback> {
     Some(Feedback {
         id: raw[0],
         kind,
+        profile,
         mode: Mode::from_byte(raw[1]),
         mode_raw: raw[1],
         current_a: raw_to_amps(current_raw),
@@ -587,7 +655,18 @@ pub fn parse_feedback(data: &[u8], kind: ReplyKind) -> Option<Feedback> {
 /// assert!(parse_feedback_strict(&bad, ReplyKind::Query).is_none());
 /// ```
 pub fn parse_feedback_strict(data: &[u8], kind: ReplyKind) -> Option<Feedback> {
-    parse_feedback(data, kind).filter(|fb| fb.crc_ok)
+    parse_feedback_strict_with_profile(data, kind, FirmwareProfile::Standard)
+}
+
+/// Like [`parse_feedback_with_profile`], but **rejects** a frame whose byte 9 does not
+/// match its CRC-8/MAXIM: a decoded [`Feedback`] with `crc_ok == false`
+/// becomes `None`.
+pub fn parse_feedback_strict_with_profile(
+    data: &[u8],
+    kind: ReplyKind,
+    profile: FirmwareProfile,
+) -> Option<Feedback> {
+    parse_feedback_with_profile(data, kind, profile).filter(|fb| fb.crc_ok)
 }
 
 /// Encode a synthetic **query-layout** reply frame (the layout elicited by a
@@ -757,4 +836,62 @@ pub(crate) fn frames<'a>(tx: &[u8], rx: &'a [u8]) -> Option<std::slice::Iter<'a,
         return None;
     }
     Some(whole.iter())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enable_disable_frames() {
+        let en = frame_enable(0x01);
+        assert_eq!(en[0], 0x01);
+        assert_eq!(en[1], CMD_ENABLE);
+        assert_eq!(en[2], SUB_ENABLE);
+        assert_eq!(en[9], crc8_maxim(&en[..9]));
+
+        let dis = frame_disable(0x01);
+        assert_eq!(dis[0], 0x01);
+        assert_eq!(dis[1], CMD_ENABLE);
+        assert_eq!(dis[2], SUB_DISABLE);
+        assert_eq!(dis[9], crc8_maxim(&dis[..9]));
+    }
+
+    #[test]
+    fn test_iap_frames() {
+        let trigger = frame_enter_iap();
+        assert_eq!(&trigger[..4], &IAP_TRIGGER);
+
+        let chunk_data = [0x12, 0x34, 0x56, 0x78];
+        let chunk_packet = frame_iap_chunk(&chunk_data);
+        assert_eq!(chunk_packet.len(), 2 + 4 + 1);
+        assert_eq!(chunk_packet[0], 0xAA);
+        assert_eq!(chunk_packet[1], 0x55);
+        assert_eq!(&chunk_packet[2..6], &chunk_data);
+        assert_eq!(chunk_packet[6], crc8_maxim(&chunk_data));
+    }
+
+    #[test]
+    fn test_parse_feedback_profiles() {
+        let raw = [0x01, 0x02, 0x00, 0x00, 0x00, 0x64, 0x28, 0x80, 0x10, 0x00];
+        // Standard profile
+        if let Some(fb_std) = parse_feedback_with_profile(&raw, ReplyKind::Query, FirmwareProfile::Standard) {
+            assert_eq!(fb_std.profile, FirmwareProfile::Standard);
+            assert!(fb_std.faults.overheat());
+            assert!(fb_std.effective_faults().overheat());
+            assert!(fb_std.has_valid_temperature());
+        } else {
+            assert!(false, "parse_feedback failed");
+        }
+
+        // NoTemperature profile
+        if let Some(fb_notemp) = parse_feedback_with_profile(&raw, ReplyKind::Query, FirmwareProfile::NoTemperature) {
+            assert_eq!(fb_notemp.profile, FirmwareProfile::NoTemperature);
+            assert!(fb_notemp.faults.overheat());
+            assert!(!fb_notemp.effective_faults().overheat(), "overheat must be masked in effective_faults");
+            assert!(!fb_notemp.has_valid_temperature());
+        } else {
+            assert!(false, "parse_feedback failed");
+        }
+    }
 }

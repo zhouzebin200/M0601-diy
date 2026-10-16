@@ -27,6 +27,10 @@ struct Cli {
     #[arg(long, global = true, default_value = "0x01", value_parser = parse_id)]
     id: u8,
 
+    /// Firmware profile: standard or no-temperature (for 01a_no_temperature.bin)
+    #[arg(long, global = true, default_value = "standard", value_parser = parse_profile)]
+    profile: m0601::FirmwareProfile,
+
     /// Serial read timeout in seconds (reply window for one-shot reads;
     /// the 50 Hz drive/control loops use their own fixed 6 ms wait)
     #[arg(long, global = true, default_value_t = 0.15, value_parser = parse_timeout)]
@@ -88,6 +92,22 @@ enum Cmd {
         /// two commands that can move the motor.
         #[arg(long)]
         yes: bool,
+    },
+    /// Enable motor driver output (0xED 0xEE)
+    Enable,
+    /// Disable motor driver output (0xED 0xDD)
+    Disable,
+    /// Flash firmware (.bin) via RS485 IAP bootloader protocol
+    Update {
+        /// Path to firmware binary file (e.g. 01a_no_temperature.bin)
+        #[arg(long, value_name = "FILE")]
+        bin: std::path::PathBuf,
+        /// Send software reset trigger (AA 55 BF CF) to active motor before updating
+        #[arg(long)]
+        trigger: bool,
+        /// Chunk size in bytes (default: 2048)
+        #[arg(long, default_value_t = 2048)]
+        chunk_size: usize,
     },
 }
 
@@ -249,6 +269,11 @@ fn parse_int_auto(s: &str) -> Result<u8, String> {
     u8::from_str_radix(digits, radix).map_err(|e| format!("invalid number {s:?}: {e}"))
 }
 
+/// Parse firmware profile string: "standard" or "no-temperature".
+fn parse_profile(s: &str) -> Result<m0601::FirmwareProfile, String> {
+    s.parse::<m0601::FirmwareProfile>()
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // parse_seconds already guarantees this converts; try_from keeps the
@@ -257,7 +282,7 @@ fn main() -> ExitCode {
 
     let result = match cli.cmd {
         Cmd::Scan { full } => cmd::scan::run(&cli.port, timeout, full),
-        Cmd::Info => cmd::info::run(&cli.port, cli.id, timeout),
+        Cmd::Info => cmd::info::run(&cli.port, cli.id, timeout, cli.profile),
         Cmd::Monitor { hz, csv } => cmd::monitor::run(&cli.port, cli.id, timeout, hz, csv),
         Cmd::Control { rpm, accel } => cmd::control::run(&cli.port, cli.id, rpm, accel),
         Cmd::Drive { mode } => {
@@ -283,6 +308,23 @@ fn main() -> ExitCode {
         }
         Cmd::SetId { new, yes } => cmd::set_id::run(&cli.port, timeout, new, yes),
         Cmd::Raw { hex, yes } => cmd::raw::run(&cli.port, cli.id, timeout, &hex, yes),
+        Cmd::Enable => {
+            let mut motor = m0601::M0601::open(&cli.port, cli.id, timeout)?;
+            motor.enable()?;
+            println!("[+] Motor 0x{:02X} enabled.", cli.id);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Disable => {
+            let mut motor = m0601::M0601::open(&cli.port, cli.id, timeout)?;
+            motor.disable()?;
+            println!("[+] Motor 0x{:02X} disabled.", cli.id);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Update {
+            bin,
+            trigger,
+            chunk_size,
+        } => cmd::update::run(&cli.port, timeout, &bin, trigger, chunk_size),
     };
 
     match result {
@@ -406,5 +448,17 @@ mod tests {
         assert!(parse_int_auto("0xGG").is_err());
         assert!(parse_int_auto("300").is_err()); // overflows u8
         assert!(parse_int_auto("").is_err());
+    }
+
+    #[test]
+    fn parses_profile() {
+        use super::parse_profile;
+        use m0601::FirmwareProfile;
+
+        assert_eq!(parse_profile("standard"), Ok(FirmwareProfile::Standard));
+        assert_eq!(parse_profile("default"), Ok(FirmwareProfile::Standard));
+        assert_eq!(parse_profile("no-temperature"), Ok(FirmwareProfile::NoTemperature));
+        assert_eq!(parse_profile("notemperature"), Ok(FirmwareProfile::NoTemperature));
+        assert!(parse_profile("unknown").is_err());
     }
 }

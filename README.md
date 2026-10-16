@@ -122,6 +122,11 @@ m0601 drive current --amps 1.0           # hold ~1 A of torque (until Ctrl-C)
 m0601 drive position --deg 180           # rotate to 180° and hold (needs <10 RPM)
 m0601 set-id --new 0x02        # change the motor's persistent RS485 ID
 m0601 set-id --new 0x02 --yes  # ... skipping the confirmation prompt
+m0601 enable                   # enable motor output (0xED 0xEE)
+m0601 disable                  # disable motor output (0xED 0xDD)
+m0601 update --bin fw.bin      # flash firmware over RS485 IAP bootloader
+m0601 update --bin fw.bin --trigger # ... with software reboot trigger
+m0601 info --profile no-temperature # view readout for 01a_no_temperature firmware
 m0601 raw "01 74 00 00 00 00 00 00 00"   # arbitrary frame, CRC auto-added
 m0601 raw --yes "01 64 00 64 00 00 03 00 00"  # a motion frame needs --yes
 ```
